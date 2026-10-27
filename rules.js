@@ -73,21 +73,20 @@ const RULES = [
 
 const GREETING = /^(привет|здравств|добр|салам|салом|ассалом|salom|assalom|hello|hi|ку)/i;
 
-const TG_RE = /(?:t\.me\/|telegram\.me\/|@)([a-z][a-z0-9_]{4,31})/i;
+export const langOf = (text) => (/[а-яёўқғҳ]/i.test(text) ? 'ru' : 'uz');
 
+export const CONTACT_REPLY = {
+  thanks: T.thanks,
+  duplicate: {
+    ru: 'Ваш контакт у нас уже есть 👍 Менеджер свяжется с вами в ближайшее время.',
+    uz: 'Kontaktingiz bizda allaqachon bor 👍 Menejer tez orada bog‘lanadi.',
+  },
+};
+
+// Контакты (телефон/Telegram) обрабатываются в index.js через leads.js
 export function ruleReply(text, isFirstMessage, hasContact = false) {
-  const lang = /[а-яёўқғҳ]/i.test(text) ? 'ru' : 'uz';
+  const lang = langOf(text);
   const ask = hasContact ? '' : ASK[lang];
-  const digits = text.replace(/\D/g, '');
-  const tg = text.match(TG_RE);
-
-  // Клиент прислал телефон и/или Telegram
-  if (digits.length >= 9 || tg) {
-    const parts = [];
-    if (digits.length >= 9) parts.push(`📞 Телефон: +${digits.replace(/^\+/, '')}`);
-    if (tg) parts.push(`✈️ Telegram: @${tg[1]} — https://t.me/${tg[1]}`);
-    return { reply: T.thanks[lang], lead: parts.join('\n'), kind: 'contact' };
-  }
 
   const found = RULES.filter(([, re]) => re.test(text)).map(([key]) => T[key][lang]);
   if (found.length) return { reply: found.slice(0, 2).join('\n\n') + phoneLine(lang) + ask, lead: null };
