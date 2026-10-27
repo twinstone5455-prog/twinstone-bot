@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
 import { ruleReply, langOf, CONTACT_REPLY } from './rules.js';
-import { extractContact, recordLead, periodStats, LEADS_FILE } from './leads.js';
+import { extractContact, recordLead, appendMessage } from './leads.js';
+import { startTelegram } from './telegram.js';
 
 const {
   IG_ACCESS_TOKEN,
@@ -168,32 +169,39 @@ async function handleEvent(event) {
   const history = histories.get(userId) || [];
   history.push({ role: 'user', content: text });
 
-  // ---- Клиент прислал телефон/Telegram: считаем, дубликаты не принимаем ----
+  // ---- Mijoz telefon/Telegram yubordi: lid yaratamiz, dublikat qabul qilinmaydi ----
   const contact = extractContact(text);
   if (contact) {
     const lang = langOf(text);
     const username = await getUsername(userId);
-    const saved = recordLead({ ...contact, instagram: username ? '@' + username : userId, message: text });
+    const lead = recordLead({
+      ...contact, igId: userId, instagram: username ? '@' + username : `ID ${userId}`,
+      messages: history.filter(m => m.role === 'user').map(m => m.content),
+    });
     contactGiven.add(userId);
-    const reply = saved ? CONTACT_REPLY.thanks[lang] : CONTACT_REPLY.duplicate[lang];
+    const reply = lead ? CONTACT_REPLY.thanks[lang] : CONTACT_REPLY.duplicate[lang];
     history.push({ role: 'assistant', content: reply });
     histories.set(userId, history.slice(-MAX_HISTORY));
     await sendText(userId, reply);
 
-    if (saved) {
+    if (lead) {
       const client = username ? `@${username} — https://instagram.com/${username}` : `ID ${userId}`;
-      const asked = history.filter(m => m.role === 'user').slice(-5).map(m => `• ${m.content}`).join('\n');
       await notifyTelegram(
-        `🔥 Заявка №${saved.n} из Instagram\n\nКлиент: ${client}\n` +
-        (contact.phone ? `📞 Телефон: ${contact.phone}\n` : '') +
-        (contact.telegram ? `✈️ Telegram: ${contact.telegram} — https://t.me/${contact.telegram.slice(1)}\n` : '') +
-        `\nПереписка:\n${asked}\n\n📊 Сегодня: ${saved.today} · Всего: ${saved.total}`
+        `🔥 Lid №${lead.n} · baho ${lead.cat} (${lead.score} ball)\n\nMijoz: ${client}\n` +
+        (lead.phone ? `📞 ${lead.phone}\n` : '') +
+        (lead.telegram ? `✈️ ${lead.telegram} — https://t.me/${lead.telegram.slice(1)}\n` : '') +
+        `\nYozishma:\n${lead.messages.slice(-5).map(m => '• ' + m).join('\n')}\n\n` +
+        `/aktiv ${lead.n} · /musor ${lead.n} · /sotuv ${lead.n} summa · /lid ${lead.n}`
       );
     } else {
-      console.log(`Дубликат контакта от ${username || userId} — заявка не создана`);
+      appendMessage(userId, text);
+      console.log(`Dublikat kontakt: ${username || userId} — lid yaratilmadi`);
     }
     return;
   }
+
+  // Lid qoldirgan mijoz yana yozsa — yozishmaga qo'shamiz, baho yangilanadi
+  appendMessage(userId, text);
 
   let reply;
   let lead = null;
@@ -298,66 +306,6 @@ function remember(set, id) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ---------- Статистика в Telegram: /stats, /excel и авто-отчёты ----------
-function statsText(title = '📊 Статистика заявок из Instagram') {
-  const s = periodStats();
-  return `${title}\n\n` +
-    `Сегодня: ${s.today}\n` +
-    `Эта неделя: ${s.week}\n` +
-    `Этот месяц: ${s.month}\n\n` +
-    `Прошлая неделя (${s.prevWeekRange}): ${s.prevWeek}\n` +
-    `Прошлый месяц (${s.prevMonthName}): ${s.prevMonth}\n\n` +
-    `Всего номеров: ${s.total}\n(дубликаты не считаются)`;
-}
-
-async function sendLeadsFile() {
-  const csv = '﻿' + fs.readFileSync(LEADS_FILE, 'utf8'); // BOM — чтобы Excel показал кириллицу
-  const form = new FormData();
-  form.append('chat_id', TELEGRAM_CHAT_ID);
-  form.append('caption', 'Все заявки из Instagram (открывается в Excel)');
-  form.append('document', new Blob([csv], { type: 'text/csv' }), `instagram-leads-${new Date().toISOString().slice(0, 10)}.csv`);
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, { method: 'POST', body: form });
-}
-
-async function pollTelegram() {
-  let offset = 0;
-  for (;;) {
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=50&offset=${offset}&allowed_updates=["message"]`);
-      const data = await res.json();
-      for (const u of data.result || []) {
-        offset = u.update_id + 1;
-        const m = u.message;
-        if (!m?.text || String(m.chat.id) !== String(TELEGRAM_CHAT_ID)) continue;
-        const cmd = m.text.split(/[@\s]/)[0].toLowerCase();
-        if (cmd === '/stats' || cmd === '/statistika') await notifyTelegram(statsText());
-        if (cmd === '/excel' || cmd === '/export') await sendLeadsFile();
-      }
-    } catch (err) {
-      console.error('Telegram poll error:', err.message);
-      await sleep(5000);
-    }
-  }
-}
-
-// Каждую минуту проверяем время по Ташкенту: пн 9:00 — неделя, 1-е число 9:00 — месяц
-let lastReport = '';
-setInterval(async () => {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  const t = periodStats().now;
-  if (t.getHours() !== 9 || t.getMinutes() !== 0) return;
-  const key = t.toDateString();
-  if (lastReport === key) return;
-  lastReport = key;
-  const s = periodStats();
-  if (t.getDate() === 1) {
-    await notifyTelegram(`🗓 Отчёт за ${s.prevMonthName}: ${s.prevMonth} новых номеров\n\n` + statsText(''));
-    await sendLeadsFile();
-  } else if (t.getDay() === 1) {
-    await notifyTelegram(`🗓 Отчёт за неделю ${s.prevWeekRange}: ${s.prevWeek} новых номеров\n\n` + statsText(''));
-  }
-}, 60 * 1000);
-
-if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) pollTelegram();
+startTelegram();
 
 app.listen(PORT, () => console.log(`Bot listening on port ${PORT}`));
