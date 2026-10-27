@@ -28,11 +28,11 @@ const SYSTEM_PROMPT = `Ты — вежливый онлайн-консульта
 Пиши коротко, как в мессенджере: 1–4 предложения, без markdown, можно 1 эмодзи.
 Отвечай ТОЛЬКО по базе знаний ниже. Если информации нет (точная цена, наличие, сроки под объём) —
 не выдумывай, скажи, что уточнит менеджер, и попроси номер телефона.
-Твоя цель — помочь и получить контакт: имя, телефон, что нужно (товар, объём в м², город/объект).
+Твоя цель — помочь и получить контакт: имя, номер телефона ИЛИ Telegram (@username), что нужно (товар, объём в м², город/объект).
 Предлагай бесплатный дизайн-проект раскладки и выезд менеджера на объект.
 
-Когда клиент оставил номер телефона ИЛИ просит живого менеджера, в САМОМ КОНЦЕ ответа добавь отдельной строкой:
-[LEAD] имя=...; телефон=...; запрос=...
+Когда клиент оставил номер телефона или Telegram ИЛИ просит живого менеджера, в САМОМ КОНЦЕ ответа добавь отдельной строкой:
+[LEAD] имя=...; телефон=...; telegram=...; запрос=...
 (неизвестные поля пиши "-"). Клиент эту строку не увидит.
 
 === БАЗА ЗНАНИЙ ===
@@ -43,6 +43,7 @@ const histories = new Map();   // userId -> [{role, content}]
 const pausedUntil = new Map(); // userId -> timestamp
 const botMessageIds = new Set();
 const processedMids = new Set();
+const contactGiven = new Set(); // клиенты, уже оставившие телефон/Telegram — бот больше не просит
 const MAX_HISTORY = 20;
 const pauseMs = Number(HUMAN_PAUSE_HOURS) * 3600 * 1000;
 
@@ -154,9 +155,10 @@ async function handleEvent(event) {
   if (!msg.text) {
     if (msg.attachments?.length) {
       await sendText(userId,
-        'Спасибо! Менеджер посмотрит вложение и ответит. Напишите, пожалуйста, ваш вопрос текстом и номер телефона 🙏\n' +
-        'Rahmat! Menejer ko‘rib chiqadi. Savolingizni va telefon raqamingizni yozib qoldiring 🙏');
-      await notifyTelegram(`📎 Вложение в Директ от клиента ${userId}`);
+        'Спасибо! Менеджер посмотрит вложение и ответит. Оставьте, пожалуйста, номер телефона или Telegram 🙏\n' +
+        'Rahmat! Menejer ko‘rib chiqadi. Telefon raqamingiz yoki Telegram’ingizni qoldiring 🙏');
+      const username = await getUsername(userId);
+      await notifyTelegram(`📎 Клиент прислал фото/видео/голосовое в Директ\nКлиент: ${username ? `@${username} — https://instagram.com/${username}` : `ID ${userId}`}`);
     }
     return;
   }
@@ -167,12 +169,14 @@ async function handleEvent(event) {
 
   let reply;
   let lead = null;
+  let kind = 'contact';
   if (anthropic) {
     reply = await askAI(history);
   } else {
-    const r = ruleReply(text, history.length === 1);
+    const r = ruleReply(text, history.length === 1, contactGiven.has(userId));
     reply = r.reply;
     lead = r.lead;
+    kind = r.kind || 'contact';
   }
   const leadMatch = reply.match(/\[LEAD\](.*)$/m);
   if (leadMatch) {
@@ -185,14 +189,20 @@ async function handleEvent(event) {
 
   await sendText(userId, reply);
 
-  if (lead || HANDOFF_WORDS.test(text)) {
+  const wantsHuman = HANDOFF_WORDS.test(text);
+  if (lead || wantsHuman) {
+    if (kind === 'contact') contactGiven.add(userId);
     const username = await getUsername(userId);
+    const client = username ? `@${username} — https://instagram.com/${username}` : `ID ${userId}`;
+    const asked = history.filter(m => m.role === 'user').slice(-5).map(m => `• ${m.content}`).join('\n');
+    const title = kind === 'question' ? '❓ Вопрос без ответа (Instagram)' : '🔥 Новая заявка из Instagram';
     await notifyTelegram(
-      `🔥 Заявка из Instagram\nКлиент: ${username ? '@' + username : userId}\n` +
-      (lead ? `Данные: ${lead}\n` : '') +
-      `Последнее сообщение: ${text}`
+      `${title}\n\nКлиент: ${client}\n` +
+      (lead ? `${lead}\n` : '') +
+      (wantsHuman ? 'Клиент просит менеджера\n' : '') +
+      `\nПереписка:\n${asked}`
     );
-    if (HANDOFF_WORDS.test(text)) pausedUntil.set(userId, Date.now() + pauseMs);
+    if (wantsHuman) pausedUntil.set(userId, Date.now() + pauseMs);
   }
 }
 
