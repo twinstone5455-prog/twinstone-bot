@@ -179,8 +179,20 @@ function report(period) {
   exp.forEach(e => { channels[e.channel] = (channels[e.channel] || 0) + e.amount; });
   const chText = Object.entries(channels).map(([c, a]) => `   ${c}: ${som(a)}`).join('\n');
 
+  // Voronka: yozganlar → raqam → aktiv → sotildi (pulga bo'linmaydi)
+  const dlgIds = new Set(dialogsIn(period.from, period.to).map(d => String(d.igId)));
+  const writers = dlgIds.size + list.filter(l => !l.igId || !dlgIds.has(String(l.igId))).length;
+  const nums = list.length;
+  const active = list.filter(l => l.status === 'aktiv').length;
+  const bar = (n) => n && writers ? '▰'.repeat(Math.max(1, Math.round(10 * n / writers))) : '';
+
   return `📊 HISOBOT — ${period.label}\n(${period.from} — ${period.to})\n\n` +
-    `👥 Lidlar: ${list.length}\n${byCat}\n\n${bySt}\n\n` +
+    `🔻 VORONKA\n` +
+    `✍️ Yozgan odamlar: ${writers} ${bar(writers)}\n` +
+    `📞 Raqam qoldirgan: ${nums} (${pct(nums, writers)}) ${bar(nums)}\n` +
+    `✅ Aktiv: ${active} (${pct(active, nums)} raqamlardan)\n` +
+    `💰 Sotilgan: ${sold.length} (${pct(sold.length, nums)} raqamlardan)\n\n` +
+    `👥 Lidlar (raqam): ${nums}\n${byCat}\n\n${bySt}\n\n` +
     `📣 Marketing xarajati: ${som(spend)}${usdSum(exp) ? ` (shundan ${usd(usdSum(exp))})` : ''}\n${chText ? chText + '\n' : ''}` +
     `💵 1 lid narxi: ${list.length ? som(spend / list.length) : '—'}\n\n` +
     `💰 Sotuvlar: ${sold.length} ta — ${som(revenue)}\n` +
@@ -188,7 +200,6 @@ function report(period) {
     `🎯 Konversiya (lid → sotuv): ${pct(sold.length, list.length)}\n` +
     `🧲 1 sotuv narxi: ${sold.length ? som(spend / sold.length) : '—'}\n` +
     `📈 ROMI: ${spend ? (((revenue - spend) / spend) * 100).toFixed(0) + '%' : '—'}\n\n` +
-    `✍️ Directga yozganlar: ${dialogsIn(period.from, period.to).length}\n` +
     `👤 Obunachilar raqami: ${list.filter(l => l.follower === true).length} · obunasiz: ${list.filter(l => l.follower === false).length}\n` +
     `📍 Reels/Target bo‘yicha: /manbalar`;
 }
