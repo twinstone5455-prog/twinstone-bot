@@ -66,8 +66,16 @@ export async function importHistory(fromDate) {
         r.withContact++;
         const contact = extractContact(hit.message);
         const when = tash(hit.created_time);
+        let follower = null;
+        const igsid = client.id || hit.from?.id;
+        if (igsid) {
+          try {
+            const pr = await get(igsid, { fields: 'is_user_follow_business' });
+            if (typeof pr.is_user_follow_business === 'boolean') follower = pr.is_user_follow_business;
+          } catch { /* noma'lum */ }
+        }
         const lead = recordLead({
-          ...contact, ...when, source: 'import',
+          ...contact, ...when, source: 'I', follower,
           igId: client.id || hit.from?.id || null,
           instagram: client.username ? '@' + client.username : (hit.from?.username ? '@' + hit.from.username : 'Instagram'),
           messages: texts,

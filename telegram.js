@@ -1,6 +1,7 @@
 // Telegram guruhidagi buyruqlar: hisobotlar, filtr, qidiruv, holat, sotuv, xarajat.
 import { importHistory } from './history.js';
 import {
+  dialogsIn, sourceList, sourceByCode, renameSource,
   query, getLead, updateLead, addExpense, deleteExpense, expensesIn, toCSV, expensesCSV,
   tashNow, iso, STATUSES, CATS,
 } from './leads.js';
@@ -25,6 +26,7 @@ const HOME = { inline_keyboard: [[btn('🏠 Menyu', 'menu')]] };
 const MENU = { inline_keyboard: [
   [btn('📊 Hisobot', 'm:hisobot'), btn('🔎 Lidlar', 'm:lidlar')],
   [btn('📣 Xarajat qo‘shish', 'm:xarajat'), btn('📋 Xarajatlar', 'm:xarajatlar')],
+  [btn('📍 Manbalar: Reels/Target', 'm:manbalar')],
   [btn('📁 Excel', 'm:excel'), btn('📖 Yordam', 'm:yordam')],
 ] };
 const periodKb = (act) => ({ inline_keyboard: [
@@ -49,7 +51,7 @@ export const leadKb = (n) => ({ inline_keyboard: [
 const ASK_EXP = '📣 XARAJAT QO‘SHISH';
 const ASK_SALE = '💰 SOTUV №';
 const ASK_PERIOD = '📅 DAVR';
-const ACT_CMD = { h: '/hisobot', l: '/lidlar', e: '/excel', x: '/xarajatlar' };
+const ACT_CMD = { h: '/hisobot', l: '/lidlar', e: '/excel', x: '/xarajatlar', sr: '/manbalar' };
 const askReply = (text) => api('sendMessage', { chat_id: CHAT, text, reply_markup: { force_reply: true, selective: false } });
 
 export async function send(text, markup = HOME) {
@@ -116,10 +118,13 @@ function parsePeriod(tok) {
 
 /** Argumentlarni ajratish: davr, baho (A–E), holat — istalgan tartibda */
 function parseFilters(args) {
-  const f = { period: null, cat: null, status: null, rest: [] };
+  const f = { period: null, cat: null, status: null, source: null, follower: null, rest: [] };
   for (const a of args) {
     const p = parsePeriod(a);
-    if (p && !f.period) f.period = p;
+    if (/^obunachi$/i.test(a)) f.follower = true;
+    else if (/^obunasiz$/i.test(a)) f.follower = false;
+    else if (!/^[a-e]$/i.test(a) && sourceByCode(a)) f.source = sourceByCode(a).code;
+    else if (p && !f.period) f.period = p;
     else if (/^[a-e]$/i.test(a)) f.cat = a.toUpperCase();
     else if (STATUSES.includes(a.toLowerCase())) f.status = a.toLowerCase();
     else f.rest.push(a);
@@ -142,7 +147,7 @@ function parseAmount(tokens) {
 function line(l) {
   const who = l.phone || l.telegram || '';
   const msg = (l.messages?.[0] || '').slice(0, 40);
-  return `№${l.n} · ${l.cat} · ${ICON[l.status]}${l.status === 'sotildi' ? ' ' + som(l.amount) : ''} · ${l.date.slice(5)} · ${who} · ${l.instagram || ''}${msg ? ' — ' + msg : ''}`;
+  return `№${l.n} · ${l.cat} · ${l.source || ''}${l.follower ? '👤' : ''} · ${ICON[l.status]}${l.status === 'sotildi' ? ' ' + som(l.amount) : ''} · ${l.date.slice(5)} · ${who} · ${l.instagram || ''}${msg ? ' — ' + msg : ''}`;
 }
 
 function report(period) {
@@ -165,13 +170,56 @@ function report(period) {
     `🧾 O‘rtacha chek: ${sold.length ? som(revenue / sold.length) : '—'}\n` +
     `🎯 Konversiya (lid → sotuv): ${pct(sold.length, list.length)}\n` +
     `🧲 1 sotuv narxi: ${sold.length ? som(spend / sold.length) : '—'}\n` +
-    `📈 ROMI: ${spend ? (((revenue - spend) / spend) * 100).toFixed(0) + '%' : '—'}`;
+    `📈 ROMI: ${spend ? (((revenue - spend) / spend) * 100).toFixed(0) + '%' : '—'}\n\n` +
+    `✍️ Directga yozganlar: ${dialogsIn(period.from, period.to).length}\n` +
+    `👤 Obunachilar raqami: ${list.filter(l => l.follower === true).length} · obunasiz: ${list.filter(l => l.follower === false).length}\n` +
+    `📍 Reels/Target bo‘yicha: /manbalar`;
+}
+
+// Manbalar: har bir reklama/reels bo'yicha — yozganlar, raqamlar, xarajat, narx
+function sourcesReport(period) {
+  const dlg = dialogsIn(period.from, period.to);
+  const lds = query({ from: period.from, to: period.to });
+  const exp = expensesIn(period.from, period.to);
+  const spendOf = (code) => exp.filter(e => e.channel.toUpperCase() === code.toUpperCase()).reduce((s, e) => s + e.amount, 0);
+  const codes = [...new Set([...dlg.map(d => d.source), ...lds.map(l => l.source), ...exp.map(e => e.channel.toUpperCase())])]
+    .filter(c => sourceByCode(c));
+  const rows = codes.map(code => {
+    const src = sourceByCode(code);
+    const wrote = dlg.filter(d => d.source === code).length;
+    const nums = lds.filter(l => l.source === code);
+    const fol = nums.filter(l => l.follower === true).length;
+    const spend = spendOf(code);
+    return { code, src, wrote, nums: nums.length, fol, spend };
+  }).sort((a, b) => b.nums - a.nums || b.wrote - a.wrote);
+
+  const target = rows.filter(r => r.src.type === 'ad');
+  const tSpend = target.reduce((s, r) => s + r.spend, 0) + exp.filter(e => e.channel === 'target').reduce((s, e) => s + e.amount, 0);
+  const tNums = target.reduce((s, r) => s + r.nums, 0);
+  const tWrote = target.reduce((s, r) => s + r.wrote, 0);
+  const folAll = lds.filter(l => l.follower === true).length;
+  const nonFol = lds.filter(l => l.follower === false).length;
+
+  const block = (r) => `${r.code} — ${r.src.label}\n` +
+    `   ✍️ yozdi: ${r.wrote} · 📞 raqam: ${r.nums} (${pct(r.nums, r.wrote)}) · 👤 obunachi: ${r.fol}\n` +
+    (r.spend ? `   💸 ${som(r.spend)} · 1 yozgan: ${r.wrote ? som(r.spend / r.wrote) : '—'} · 1 raqam: ${r.nums ? som(r.spend / r.nums) : '—'}\n` : '');
+
+  return `📍 MANBALAR — ${period.label}\n(${period.from} — ${period.to})\n\n` +
+    `🎯 TARGET jami: ${som(tSpend)} sarflandi\n` +
+    `   ✍️ yozdi: ${tWrote} · 📞 raqam: ${tNums}\n` +
+    `   1 raqam narxi: ${tNums ? som(tSpend / tNums) : '—'}\n\n` +
+    `👤 Obunachilar qoldirgan raqamlar: ${folAll}\n` +
+    `🙋 Obuna bo‘lmaganlar: ${nonFol}${lds.length - folAll - nonFol ? ` · noma’lum: ${lds.length - folAll - nonFol}` : ''}\n\n` +
+    (rows.length ? rows.map(block).join('\n') : 'Hali ma’lumot yo‘q') +
+    `\n\nXarajat yozish: /xarajat 2 mln T1 · Nom berish: /manba_nom T1 Bruschatka aksiya`;
 }
 
 function card(l) {
   return `🧾 Lid №${l.n} — baho ${l.cat} (${l.score} ball${l.catManual ? ', qo‘lda' : ''})\n` +
     `Sana: ${l.date} ${l.time}\nHolat: ${ICON[l.status]} ${l.status}${l.amount ? ' — ' + som(l.amount) : ''}\n` +
     (l.instagram ? `Instagram: ${l.instagram}${l.instagram.startsWith('@') ? ' — https://instagram.com/' + l.instagram.slice(1) : ''}\n` : '') +
+    `📍 Manba: ${l.source || '—'} ${sourceByCode(l.source)?.label ? '— ' + sourceByCode(l.source).label : ''}\n` +
+    `👤 Obunachi: ${l.follower == null ? 'noma’lum' : l.follower ? 'ha' : 'yo‘q'}\n` +
     (l.phone ? `📞 ${l.phone}\n` : '') +
     (l.telegram ? `✈️ ${l.telegram} — https://t.me/${l.telegram.slice(1)}\n` : '') +
     `\nYozishma:\n${(l.messages || []).slice(-10).map(m => '• ' + m).join('\n')}\n\n` +
@@ -199,7 +247,15 @@ const HELP = `📖 BUYRUQLAR
 /sotuv 884 12000000 (yoki 12 mln)
 /baho 884 A
 
-📣 Marketing xarajati:
+📍 Reels / Target (qayerdan keldi):
+/manbalar oy — har bir reklama (T1, T2…) va reels (R1…) bo‘yicha:
+   nechta yozdi, nechta raqam, obunachilar, sarf, 1 raqam narxi
+/manba_nom T1 Bruschatka aksiya — kodga nom berish
+/lidlar oy T1 — shu reklamadan kelgan raqamlar
+/lidlar oy obunachi — obunachilar qoldirgan raqamlar
+
+📣 Marketing xarajati (target uchun kod bilan):
+/xarajat 2 mln T1 — T1 reklamaga sarf
 /xarajat 500000 instagram
 /xarajat 1.5 mln target 2026-10-01 bannerlar
 /xarajatlar oy — ro‘yxat
@@ -237,8 +293,8 @@ async function handle(text) {
     case '/lidlar': {
       if (!args.length) return send('🔎 Qaysi davrdagi lidlar?', periodKb('l'));
       const f = parseFilters(args);
-      const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status });
-      const title = `🔎 ${f.period.label}${f.cat ? ' · ' + f.cat : ''}${f.status ? ' · ' + f.status : ''}: ${list.length} ta lid`;
+      const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status, source: f.source, follower: f.follower });
+      const title = `🔎 ${f.period.label}${f.cat ? ' · ' + f.cat : ''}${f.status ? ' · ' + f.status : ''}${f.source ? ' · ' + f.source : ''}${f.follower != null ? (f.follower ? ' · obunachi' : ' · obunasiz') : ''}: ${list.length} ta lid`;
       if (!list.length) return send(title);
       await send(title + '\n\n' + list.slice(-30).reverse().map(line).join('\n') +
         (list.length > 30 ? `\n\n…oxirgi 30 tasi ko‘rsatildi. Hammasi Excel faylda 👇` : ''));
@@ -282,7 +338,8 @@ async function handle(text) {
       const amount = parseAmount(nums);
       if (!args.length) return askReply(`${ASK_EXP}\n\nShu xabarga javob qilib summa va kanalni yozing:\n500000 instagram\n1.5 mln target\n2000000 instagram 2026-10-01 izoh`);
       if (!amount) return send('Masalan: /xarajat 500000 instagram  yoki  /xarajat 1.5 mln target 2026-10-01');
-      const channel = rest[0] && !DATE_RE.test(rest[0]) ? rest.shift().toLowerCase() : 'instagram';
+      let channel = rest[0] && !DATE_RE.test(normDate(rest[0], tashNow())) ? rest.shift().toLowerCase() : 'instagram';
+      if (sourceByCode(channel)) channel = sourceByCode(channel).code;
       if (rest[0]) rest[0] = normDate(rest[0], tashNow());
       const date = rest[0] && DATE_RE.test(rest[0]) ? rest.shift() : undefined;
       const e = addExpense({ amount, channel, date, note: rest.join(' ') });
@@ -295,6 +352,18 @@ async function handle(text) {
       const sum = list.reduce((s, e) => s + e.amount, 0);
       return send(`📣 Xarajatlar — ${p.label}: ${som(sum)}\n\n` +
         (list.map(e => `№${e.id} · ${e.date} · ${som(e.amount)} · ${e.channel}${e.note ? ' · ' + e.note : ''}`).join('\n') || 'Yozuv yo‘q'));
+    }
+
+    case '/manbalar': case '/manba': {
+      if (!args.length) return send('📍 Qaysi davr uchun manbalar (Reels/Target)?', periodKb('sr'));
+      const p = parsePeriod(args.join('')) || parsePeriod('oy');
+      return send(sourcesReport(p));
+    }
+
+    case '/manba_nom': {
+      const code = args[0]; const name = args.slice(1).join(' ');
+      const src = code && name ? renameSource(code, name) : null;
+      return send(src ? `${src.code} → «${src.label}»` : 'Masalan: /manba_nom T1 Bruschatka aksiya\nKodlar: ' + sourceList().map(x => x.code).join(', '));
     }
 
     case '/import': {
@@ -318,9 +387,9 @@ async function handle(text) {
     case '/excel': case '/export': {
       if (!args.length) return send('📁 Qaysi davr uchun Excel?', periodKb('e'));
       const f = parseFilters(args);
-      const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status });
+      const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status, source: f.source, follower: f.follower });
       return sendFile(`lidlar-${f.period.from}_${f.period.to}.csv`, toCSV(list),
-        `📁 Lidlar: ${f.period.label}${f.cat ? ' · ' + f.cat : ''}${f.status ? ' · ' + f.status : ''} — ${list.length} ta`);
+        `📁 Lidlar: ${f.period.label}${f.cat ? ' · ' + f.cat : ''}${f.status ? ' · ' + f.status : ''}${f.source ? ' · ' + f.source : ''}${f.follower != null ? (f.follower ? ' · obunachi' : ' · obunasiz') : ''} — ${list.length} ta`);
     }
 
     case '/excel_xarajat': {
@@ -344,11 +413,13 @@ async function onButton(q) {
       if (a === 'excel') return send('📁 Qaysi davr uchun Excel?', periodKb('e'));
       if (a === 'xarajatlar') return send('📋 Qaysi davr xarajatlari?', periodKb('x'));
       if (a === 'xarajat') return handle('/xarajat');
+      if (a === 'manbalar') return send('📍 Qaysi davr uchun manbalar (Reels/Target)?', periodKb('sr'));
       if (a === 'yordam') return handle('/yordam');
       return;
     case 'p': return askReply(`${ASK_PERIOD} (${a})\n\nShu xabarga javob qilib davrni yozing:\n16.10..bugun\n01.10..15.10\n2026-10`);
     case 'h': return handle(`/hisobot ${a}`);
     case 'x': return handle(`/xarajatlar ${a}`);
+    case 'sr': return handle(`/manbalar ${a}`);
     case 'l': return b ? handle(`/lidlar ${a} ${b === '-' ? '' : b}`) : send('Qaysi lidlar?', filterKb('l', a));
     case 'e': return b ? handle(`/excel ${a} ${b === '-' ? '' : b}`) : send('Qaysi lidlar Excel’ga?', filterKb('e', a));
     case 's': {
@@ -367,7 +438,7 @@ async function onButton(q) {
 async function onReply(m) {
   const q = m.reply_to_message.text || '';
   if (q.startsWith(ASK_PERIOD)) {
-    const act = (q.match(/\((\w)\)/) || [])[1] || 'h';
+    const act = (q.match(/\((\w+)\)/) || [])[1] || 'h';
     return handle(`${ACT_CMD[act]} ${m.text.trim().replace(/\s+/g, '')}`);
   }
   if (q.startsWith(ASK_EXP)) return handle(`/xarajat ${m.text}`);

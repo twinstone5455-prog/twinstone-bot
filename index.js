@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
 import { ruleReply, langOf, CONTACT_REPLY } from './rules.js';
-import { extractContact, recordLead, appendMessage } from './leads.js';
+import { extractContact, recordLead, appendMessage, recordDialog, getDialog, sourceCode, sourceByCode } from './leads.js';
 import { startTelegram, send as tgSend, leadKb } from './telegram.js';
 
 const {
@@ -128,9 +128,35 @@ function validSignature(req) {
   } catch { return false; }
 }
 
+// ---------- Manba: qayerdan yozdi (target / reels / stories / organik) ----------
+function detectSource(event) {
+  const msg = event.message || {};
+  const ref = event.referral || msg.referral || event.postback?.referral;
+  if (ref && (ref.ad_id || ref.source === 'ADS')) {
+    const title = ref.ads_context_data?.ad_title;
+    const key = 'ad:' + (ref.ad_id || title || 'unknown');
+    return sourceCode(key, title ? `Reklama: ${title.slice(0, 60)}` : `Reklama #${ref.ad_id || '?'}`, 'ad');
+  }
+  if (ref?.ref) return sourceCode('link:' + ref.ref, `Havola: ${ref.ref}`, 'link');
+  const reel = (msg.attachments || []).find(a => ['ig_reel', 'reel', 'share'].includes(a.type));
+  if (reel) {
+    const p = reel.payload || {};
+    const id = p.reel_video_id || p.id || p.url || 'reel';
+    return sourceCode('reel:' + id, `Reels: ${(p.title || p.url || id).slice(0, 60)}`, 'reel');
+  }
+  if (msg.reply_to?.story || (msg.attachments || []).some(a => a.type === 'story_mention')) return 'S';
+  return 'O';
+}
+
 // ---------- Логика ----------
 async function handleEvent(event) {
   const msg = event.message;
+  // Reklama/havola orqali ochilgan suhbat (xabarsiz referral hodisasi)
+  if (!msg && event.referral && event.sender?.id) {
+    const prof = await getProfile(event.sender.id);
+    recordDialog({ igId: event.sender.id, username: prof.username, source: detectSource(event), follower: prof.follower });
+    return;
+  }
   if (!msg) return;
 
   if (msg.mid) {
@@ -151,6 +177,10 @@ async function handleEvent(event) {
   }
 
   const userId = event.sender.id;
+  {
+    const prof = await getProfile(userId);
+    recordDialog({ igId: userId, username: prof.username, source: detectSource(event), follower: prof.follower });
+  }
   if ((pausedUntil.get(userId) || 0) > Date.now()) return;
 
   // Фото, видео, голосовые, репосты сторис
@@ -174,9 +204,11 @@ async function handleEvent(event) {
   if (contact) {
     const lang = langOf(text);
     const username = await getUsername(userId);
+    const dlg = getDialog(userId) || {};
     const lead = recordLead({
       ...contact, igId: userId, instagram: username ? '@' + username : `ID ${userId}`,
       messages: history.filter(m => m.role === 'user').map(m => m.content),
+      source: dlg.source || 'O', follower: dlg.follower ?? null,
     });
     contactGiven.add(userId);
     const reply = lead ? CONTACT_REPLY.thanks[lang] : CONTACT_REPLY.duplicate[lang];
@@ -190,6 +222,8 @@ async function handleEvent(event) {
         `🔥 Lid №${lead.n} · baho ${lead.cat} (${lead.score} ball)\n\nMijoz: ${client}\n` +
         (lead.phone ? `📞 ${lead.phone}\n` : '') +
         (lead.telegram ? `✈️ ${lead.telegram} — https://t.me/${lead.telegram.slice(1)}\n` : '') +
+        `📍 Manba: ${lead.source} — ${sourceByCode(lead.source)?.label || ''}\n` +
+        `👤 Obunachi: ${lead.follower == null ? 'noma’lum' : lead.follower ? 'ha ✅' : 'yo‘q'}\n` +
         `\nYozishma:\n${lead.messages.slice(-5).map(m => '• ' + m).join('\n')}\n\n` +
         `Holat va bahoni tugmalar bilan belgilang 👇`,
         leadKb(lead.n)
@@ -274,14 +308,21 @@ async function sendText(userId, text) {
   }
 }
 
-async function getUsername(userId) {
+const profiles = new Map(); // igId -> { username, follower, at }
+async function getProfile(userId) {
+  const c = profiles.get(userId);
+  if (c && Date.now() - c.at < 6 * 3600 * 1000) return c;
   try {
     const res = await fetch(
-      `https://graph.instagram.com/${IG_API_VERSION}/${userId}?fields=username,name&access_token=${IG_ACCESS_TOKEN}`);
+      `https://graph.instagram.com/${IG_API_VERSION}/${userId}?fields=username,name,is_user_follow_business&access_token=${IG_ACCESS_TOKEN}`);
     const data = await res.json();
-    return data.username || data.name || null;
-  } catch { return null; }
+    const p = { username: data.username || data.name || null,
+      follower: typeof data.is_user_follow_business === 'boolean' ? data.is_user_follow_business : null, at: Date.now() };
+    profiles.set(userId, p);
+    return p;
+  } catch { return { username: null, follower: null }; }
 }
+async function getUsername(userId) { return (await getProfile(userId)).username; }
 
 // ---------- Telegram ----------
 async function notifyTelegram(text) {

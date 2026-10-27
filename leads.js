@@ -7,6 +7,8 @@ const DATA = new URL('./data/', import.meta.url);
 fs.mkdirSync(DATA, { recursive: true });
 const LEADS_F = new URL('leads.json', DATA);
 const EXP_F = new URL('expenses.json', DATA);
+const SRC_F = new URL('sources.json', DATA);
+const DLG_F = new URL('dialogs.json', DATA);
 const TZ = 'Asia/Tashkent';
 
 export const STATUSES = ['yangi', 'aktiv', 'sotildi', 'musor'];
@@ -94,19 +96,76 @@ if (!leads) {
   } catch { /* eski fayl yo'q */ }
   writeJSON(LEADS_F, leads);
 }
-console.log(`Bazada lidlar: ${leads.length}, xarajat yozuvlari: ${expenses.length}`);
+// ---------- Manbalar (qayerdan keldi): T1.. target, R1.. reels, S stories, O organik ----------
+let sources = readJSON(SRC_F, {});
+let dialogs = readJSON(DLG_F, {});
+const BASE_SOURCES = {
+  organic: { code: 'O', label: 'Organik (o‘zi yozgan)', type: 'organic' },
+  story: { code: 'S', label: 'Stories javobi', type: 'story' },
+  import: { code: 'I', label: 'Eski yozishmalar (import)', type: 'import' },
+  legacy: { code: 'X', label: 'Manba aniqlanmagan (tizimgacha)', type: 'legacy' },
+};
+for (const [k, v] of Object.entries(BASE_SOURCES)) sources[k] ||= v;
+// Eski lidlar: source = 'direct'/'import' → kodlarga
+for (const l of leads) {
+  if (l.source === 'import') l.source = 'I';
+  else if (!l.source || l.source === 'direct') l.source = 'X';
+}
+writeJSON(SRC_F, sources);
+
+/** Manba kaliti (masalan 'ad:123', 'reel:456') uchun qisqa kod: T1, R1 ... */
+export function sourceCode(key, label, type) {
+  if (sources[key]) {
+    if (label && sources[key].label.startsWith('Reklama #')) { sources[key].label = label; writeJSON(SRC_F, sources); }
+    return sources[key].code;
+  }
+  const prefix = type === 'ad' ? 'T' : type === 'reel' ? 'R' : 'M';
+  const n = Object.values(sources).filter(s => s.code.startsWith(prefix) && /^\D\d+$/.test(s.code)).length + 1;
+  sources[key] = { code: prefix + n, label: label || key, type, created: iso(tashNow()) };
+  writeJSON(SRC_F, sources);
+  return sources[key].code;
+}
+export const sourceList = () => Object.values(sources);
+export const sourceByCode = (code) => Object.values(sources).find(s => s.code.toUpperCase() === String(code).toUpperCase()) || null;
+export function renameSource(code, label) {
+  const src = sourceByCode(code);
+  if (!src) return null;
+  src.label = label;
+  writeJSON(SRC_F, sources);
+  return src;
+}
+
+// ---------- Dialoglar: kim yozdi (raqam qoldirmagan bo'lsa ham) ----------
+/** Mijozning birinchi xabari — dialog yaratiladi. Manba birinchi aniqlangan bo'yicha qoladi. */
+export function recordDialog({ igId, username, source, follower }) {
+  const t = tashNow();
+  let d = dialogs[igId];
+  if (!d) {
+    d = dialogs[igId] = { igId, username: username || null, date: iso(t), time: hhmm(t), source: source || 'O', follower: follower ?? null };
+  } else {
+    if (source && source !== 'O' && d.source === 'O' && d.date === iso(t)) d.source = source; // keyin kelgan reklama belgisi
+    if (follower != null) d.follower = follower;
+    if (username && !d.username) d.username = username;
+  }
+  writeJSON(DLG_F, dialogs);
+  return d;
+}
+export const getDialog = (igId) => dialogs[igId] || null;
+export const dialogsIn = (from, to) => Object.values(dialogs).filter(d => d.date >= from && d.date <= to);
+
+console.log(`Bazada lidlar: ${leads.length}, dialoglar: ${Object.keys(dialogs).length}, xarajat yozuvlari: ${expenses.length}`);
 
 const save = () => writeJSON(LEADS_F, leads);
 const keyIndex = () => new Set(leads.flatMap(l => [l.phone, l.telegram]).filter(Boolean));
 
 // ---------- Lidlar ----------
 /** Yangi lid. Dublikat bo'lsa null (telefon bor bo'lsa — telefon bo'yicha, bo'lmasa Telegram bo'yicha). */
-export function recordLead({ phone, telegram, instagram, igId, messages, date, time, source }) {
+export function recordLead({ phone, telegram, instagram, igId, messages, date, time, source, follower }) {
   const keys = keyIndex();
   if (phone ? keys.has(phone) : keys.has(telegram)) return null;
   const t = tashNow();
   const lead = {
-    n: (leads.at(-1)?.n || 0) + 1, date: date || iso(t), time: time || hhmm(t), source: source || 'direct',
+    n: (leads.at(-1)?.n || 0) + 1, date: date || iso(t), time: time || hhmm(t), source: source || 'O', follower: follower ?? null,
     instagram, igId, phone: phone || null, telegram: telegram || null,
     messages: (messages || []).slice(-20), status: 'yangi', amount: 0, catManual: false,
   };
@@ -136,11 +195,13 @@ export function updateLead(n, patch) {
   return lead;
 }
 
-export function query({ from, to, cat, status, text } = {}) {
+export function query({ from, to, cat, status, text, source, follower } = {}) {
   const q = text?.toLowerCase().replace(/[\s\-()]/g, '');
   return leads.filter(l =>
     (!from || l.date >= from) && (!to || l.date <= to) &&
     (!cat || l.cat === cat) && (!status || l.status === status) &&
+    (!source || String(l.source).toUpperCase() === source.toUpperCase()) &&
+    (follower == null || l.follower === follower) &&
     (!q || [l.phone, l.telegram, l.instagram, ...(l.messages || [])].some(v => v && v.toLowerCase().replace(/[\s\-()]/g, '').includes(q)))
   );
 }
@@ -163,8 +224,9 @@ export const expensesIn = (from, to) => expenses.filter(e => e.date >= from && e
 // ---------- Excel (CSV) ----------
 export function toCSV(list) {
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""').replace(/\s+/g, ' ')}"`;
-  const head = ['№', 'Sana', 'Vaqt', 'Baho', 'Ball', 'Holat', 'Sotuv summasi', 'Instagram', 'Telefon', 'Telegram', 'Yozishma'];
-  const rows = list.map(l => [l.n, l.date, l.time, l.cat, l.score, l.status, l.amount || '', l.instagram, l.phone, l.telegram, (l.messages || []).join(' | ')]);
+  const head = ['№', 'Sana', 'Vaqt', 'Baho', 'Ball', 'Holat', 'Sotuv summasi', 'Manba', 'Manba nomi', 'Obunachi', 'Instagram', 'Telefon', 'Telegram', 'Yozishma'];
+  const rows = list.map(l => [l.n, l.date, l.time, l.cat, l.score, l.status, l.amount || '', l.source, sourceByCode(l.source)?.label || '',
+    l.follower == null ? '' : l.follower ? 'ha' : 'yo‘q', l.instagram, l.phone, l.telegram, (l.messages || []).join(' | ')]);
   return '﻿' + [head, ...rows].map(r => r.map(esc).join(';')).join('\n');
 }
 export function expensesCSV(list) {
