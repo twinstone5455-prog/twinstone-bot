@@ -3,6 +3,7 @@ import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
+import { ruleReply } from './rules.js';
 
 const {
   IG_ACCESS_TOKEN,
@@ -17,7 +18,9 @@ const {
   HUMAN_PAUSE_HOURS = 12,
 } = process.env;
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+// Без ключа Claude бот работает бесплатно — по ключевым словам (rules.js)
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+console.log(anthropic ? 'Режим: ИИ (Claude)' : 'Режим: бесплатный (ключевые слова)');
 const KNOWLEDGE = fs.readFileSync(new URL('./knowledge.md', import.meta.url), 'utf8');
 
 const SYSTEM_PROMPT = `Ты — вежливый онлайн-консультант компании Twinstone в Instagram Direct.
@@ -123,8 +126,15 @@ async function handleEvent(event) {
   const history = histories.get(userId) || [];
   history.push({ role: 'user', content: text });
 
-  let reply = await askAI(history);
+  let reply;
   let lead = null;
+  if (anthropic) {
+    reply = await askAI(history);
+  } else {
+    const r = ruleReply(text, history.length === 1);
+    reply = r.reply;
+    lead = r.lead;
+  }
   const leadMatch = reply.match(/\[LEAD\](.*)$/m);
   if (leadMatch) {
     lead = leadMatch[1].trim();
