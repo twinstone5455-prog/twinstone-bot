@@ -137,11 +137,15 @@ export function renameSource(code, label) {
 
 // ---------- Dialoglar: kim yozdi (raqam qoldirmagan bo'lsa ham) ----------
 /** Mijozning birinchi xabari — dialog yaratiladi. Manba birinchi aniqlangan bo'yicha qoladi. */
-export function recordDialog({ igId, username, source, follower }) {
+export function recordDialog({ igId, username, source, follower, date, time }) {
+  if (!igId) return null;
   const t = tashNow();
   let d = dialogs[igId];
   if (!d) {
-    d = dialogs[igId] = { igId, username: username || null, date: iso(t), time: hhmm(t), source: source || 'O', follower: follower ?? null };
+    d = dialogs[igId] = { igId, username: username || null, date: date || iso(t), time: time || hhmm(t), source: source || 'O', follower: follower ?? null };
+  } else if (date) {
+    if (date < d.date) { d.date = date; d.time = time || d.time; } // import haqiqiy birinchi sanani beradi
+    if (username && !d.username) d.username = username;
   } else {
     if (source && source !== 'O' && d.source === 'O' && d.date === iso(t)) d.source = source; // keyin kelgan reklama belgisi
     if (follower != null) d.follower = follower;
@@ -207,8 +211,9 @@ export function query({ from, to, cat, status, text, source, follower } = {}) {
 }
 
 // ---------- Marketing xarajatlari ----------
-export function addExpense({ date, amount, channel, note }) {
-  const e = { id: (expenses.at(-1)?.id || 0) + 1, date: date || iso(tashNow()), amount, channel: channel || 'instagram', note: note || '' };
+export function addExpense({ date, amount, channel, note, usd, rate }) {
+  const e = { id: (expenses.at(-1)?.id || 0) + 1, date: date || iso(tashNow()), amount, channel: channel || 'instagram', note: note || '',
+    ...(usd ? { usd, rate } : {}) };
   expenses.push(e);
   writeJSON(EXP_F, expenses);
   return e;

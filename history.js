@@ -1,6 +1,6 @@
 // Eski Direct yozishmalarini Instagram API orqali yuklash va lidlar bazasiga qo'shish.
 // Faqat o'qiydi — mijozlarga hech narsa yubormaydi.
-import { extractContact, recordLead } from './leads.js';
+import { extractContact, recordLead, recordDialog } from './leads.js';
 
 const { IG_ACCESS_TOKEN: TOKEN, IG_API_VERSION: VER = 'v21.0' } = process.env;
 const BASE = `https://graph.instagram.com/${VER}`;
@@ -41,7 +41,7 @@ async function conversationMessages(convId) {
 
 /** fromDate (YYYY-MM-DD) dan bugungacha bo'lgan suhbatlarni yuklaydi */
 export async function importHistory(fromDate) {
-  const r = { conversations: 0, withContact: 0, added: 0, duplicates: 0, errors: 0 };
+  const r = { conversations: 0, writers: 0, withContact: 0, added: 0, duplicates: 0, errors: 0 };
   const me = await get('me', { fields: 'user_id,username' });
   const myIds = new Set([me.user_id, me.id].filter(Boolean).map(String));
   const isMine = (from) => from && (myIds.has(String(from.id)) || from.username === me.username);
@@ -59,6 +59,14 @@ export async function importHistory(fromDate) {
           .filter(m => m.message && !isMine(m.from))
           .sort((a, b) => a.created_time.localeCompare(b.created_time));
         const texts = msgs.map(m => m.message);
+
+        // Har bir yozgan odam — dialog (raqam qoldirmagan bo'lsa ham), birinchi xabar sanasi bilan
+        if (msgs.length) {
+          const first = tash(msgs[0].created_time);
+          const d = recordDialog({ igId: client.id || msgs[0].from?.id, username: client.username || msgs[0].from?.username,
+            source: 'I', date: first.date, time: first.time });
+          if (d && first.date >= fromDate) r.writers++;
+        }
 
         // Sanadan keyin yuborilgan birinchi kontaktli xabar
         const hit = msgs.find(m => tash(m.created_time).date >= fromDate && extractContact(m.message));
