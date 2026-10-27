@@ -3,6 +3,7 @@ import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
+import { ruleReply } from './rules.js';
 
 const {
   IG_ACCESS_TOKEN,
@@ -17,7 +18,9 @@ const {
   HUMAN_PAUSE_HOURS = 12,
 } = process.env;
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+// Без ключа Claude бот работает бесплатно — по ключевым словам (rules.js)
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+console.log(anthropic ? 'Режим: ИИ (Claude)' : 'Режим: бесплатный (ключевые слова)');
 const KNOWLEDGE = fs.readFileSync(new URL('./knowledge.md', import.meta.url), 'utf8');
 
 const SYSTEM_PROMPT = `Ты — вежливый онлайн-консультант компании Twinstone в Instagram Direct.
@@ -52,6 +55,45 @@ app.use(express.json({
 }));
 
 app.get('/', (_req, res) => res.send('Twinstone Instagram bot is running'));
+
+// Политика конфиденциальности и удаление данных — нужны Meta для публикации приложения
+const PAGE = (title, body) => `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6;color:#222}</style>
+</head><body>${body}</body></html>`;
+
+app.get('/privacy', (_req, res) => res.send(PAGE('Политика конфиденциальности TwinStone', `
+<h1>Политика конфиденциальности</h1>
+<p>Эта политика описывает, как компания TwinStone (Ташкент, Узбекистан) обрабатывает данные
+в автоматическом помощнике Instagram-аккаунта @twinstone.uz.</p>
+<h2>Какие данные мы получаем</h2>
+<p>Текст сообщений, которые вы отправляете нам в Instagram Direct, ваш Instagram ID и имя пользователя,
+а также контактные данные (имя, номер телефона), если вы сами их сообщаете.</p>
+<h2>Зачем</h2>
+<p>Только чтобы ответить на ваш вопрос о нашей продукции и передать вашу заявку менеджеру отдела продаж.
+Мы не продаём и не передаём ваши данные третьим лицам и не используем их для рекламы.</p>
+<h2>Хранение</h2>
+<p>История переписки хранится в оперативной памяти сервера и удаляется при его перезапуске.
+Заявки с номером телефона передаются менеджерам TwinStone для обратной связи.</p>
+<h2>Удаление данных</h2>
+<p>Чтобы удалить ваши данные, напишите нам в Instagram Direct слово «удалить» или свяжитесь с нами
+по адресу twinstone5455@gmail.com. Подробнее: <a href="/data-deletion">удаление данных</a>.</p>
+<h2>Контакты</h2>
+<p>TwinStone, г. Ташкент, Мирзо-Улугбекский район, ул. Буюк Ипак Йули, 434. Email: twinstone5455@gmail.com</p>
+`)));
+
+app.get('/data-deletion', (_req, res) => res.send(PAGE('Удаление данных TwinStone', `
+<h1>Удаление данных</h1>
+<p>Чтобы удалить данные, которые помощник TwinStone получил из Instagram, напишите в Direct @twinstone.uz
+слово «удалить» или отправьте письмо на twinstone5455@gmail.com с вашим именем пользователя Instagram.
+Мы удалим данные в течение 7 дней и подтвердим это ответом.</p>
+`)));
+
+app.get('/terms', (_req, res) => res.send(PAGE('Условия использования TwinStone', `
+<h1>Условия использования</h1>
+<p>Автоматический помощник @twinstone.uz отвечает на вопросы о продукции TwinStone.
+Цены в ответах ориентировочные; окончательную цену и условия сообщает менеджер.</p>
+`)));
 
 // Проверка вебхука Meta
 app.get('/webhook', (req, res) => {
@@ -123,8 +165,15 @@ async function handleEvent(event) {
   const history = histories.get(userId) || [];
   history.push({ role: 'user', content: text });
 
-  let reply = await askAI(history);
+  let reply;
   let lead = null;
+  if (anthropic) {
+    reply = await askAI(history);
+  } else {
+    const r = ruleReply(text, history.length === 1);
+    reply = r.reply;
+    lead = r.lead;
+  }
   const leadMatch = reply.match(/\[LEAD\](.*)$/m);
   if (leadMatch) {
     lead = leadMatch[1].trim();
