@@ -5,7 +5,7 @@ import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
 import { ruleReply, langOf, CONTACT_REPLY } from './rules.js';
 import { extractContact, recordLead, appendMessage } from './leads.js';
-import { startTelegram } from './telegram.js';
+import { startTelegram, send as tgSend, leadKb } from './telegram.js';
 
 const {
   IG_ACCESS_TOKEN,
@@ -186,12 +186,13 @@ async function handleEvent(event) {
 
     if (lead) {
       const client = username ? `@${username} — https://instagram.com/${username}` : `ID ${userId}`;
-      await notifyTelegram(
+      await tgSend(
         `🔥 Lid №${lead.n} · baho ${lead.cat} (${lead.score} ball)\n\nMijoz: ${client}\n` +
         (lead.phone ? `📞 ${lead.phone}\n` : '') +
         (lead.telegram ? `✈️ ${lead.telegram} — https://t.me/${lead.telegram.slice(1)}\n` : '') +
         `\nYozishma:\n${lead.messages.slice(-5).map(m => '• ' + m).join('\n')}\n\n` +
-        `/aktiv ${lead.n} · /musor ${lead.n} · /sotuv ${lead.n} summa · /lid ${lead.n}`
+        `Holat va bahoni tugmalar bilan belgilang 👇`,
+        leadKb(lead.n)
       );
     } else {
       appendMessage(userId, text);

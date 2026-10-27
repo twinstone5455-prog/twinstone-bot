@@ -12,13 +12,48 @@ const pct = (a, b) => (b ? ((a / b) * 100).toFixed(1) + '%' : '—');
 const ICON = { yangi: '🆕', aktiv: '✅', sotildi: '💰', musor: '🗑' };
 
 // ---------- Yuborish ----------
-export async function send(text) {
+async function api(method, body) {
+  return fetch(`${API}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json()).catch(e => console.error('Telegram:', e.message));
+}
+
+// ---------- Tugmalar ----------
+const btn = (text, data) => ({ text, callback_data: data });
+const HOME = { inline_keyboard: [[btn('🏠 Menyu', 'menu')]] };
+const MENU = { inline_keyboard: [
+  [btn('📊 Hisobot', 'm:hisobot'), btn('🔎 Lidlar', 'm:lidlar')],
+  [btn('📣 Xarajat qo‘shish', 'm:xarajat'), btn('📋 Xarajatlar', 'm:xarajatlar')],
+  [btn('📁 Excel', 'm:excel'), btn('📖 Yordam', 'm:yordam')],
+] };
+const periodKb = (act) => ({ inline_keyboard: [
+  [btn('Bugun', `${act}:bugun`), btn('Kecha', `${act}:kecha`), btn('Hafta', `${act}:hafta`)],
+  [btn('Oy', `${act}:oy`), btn('O‘tgan oy', `${act}:otganoy`), btn('Kvartal', `${act}:kvartal`)],
+  [btn('Yil', `${act}:yil`), btn('Hammasi', `${act}:hammasi`), btn('🏠 Menyu', 'menu')],
+] });
+const filterKb = (act, period) => ({ inline_keyboard: [
+  [btn('Hammasi', `${act}:${period}:-`)],
+  ['A', 'B', 'C', 'D', 'E'].map(c => btn(c, `${act}:${period}:${c}`)),
+  [btn('🆕 yangi', `${act}:${period}:yangi`), btn('✅ aktiv', `${act}:${period}:aktiv`)],
+  [btn('💰 sotildi', `${act}:${period}:sotildi`), btn('🗑 musor', `${act}:${period}:musor`)],
+  [btn('🏠 Menyu', 'menu')],
+] });
+export const leadKb = (n) => ({ inline_keyboard: [
+  [btn('✅ Aktiv', `s:${n}:aktiv`), btn('🗑 Musor', `s:${n}:musor`), btn('💰 Sotildi', `s:${n}:sotildi`)],
+  [btn('A', `c:${n}:A`), btn('B', `c:${n}:B`), btn('C', `c:${n}:C`), btn('D', `c:${n}:D`), btn('E', `c:${n}:E`)],
+] });
+
+// Javob kutadigan savollar (Telegram'da "reply") — privacy rejimida ham ishlaydi
+const ASK_EXP = '📣 XARAJAT QO‘SHISH';
+const ASK_SALE = '💰 SOTUV №';
+const askReply = (text) => api('sendMessage', { chat_id: CHAT, text, reply_markup: { force_reply: true, selective: false } });
+
+export async function send(text, markup = HOME) {
   if (!TOKEN || !CHAT) return;
   for (let i = 0; i < text.length; i += 4000) {
-    await fetch(`${API}/sendMessage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: CHAT, text: text.slice(i, i + 4000), disable_web_page_preview: true }),
-    }).catch(e => console.error('Telegram:', e.message));
+    const last = i + 4000 >= text.length;
+    await api('sendMessage', { chat_id: CHAT, text: text.slice(i, i + 4000), disable_web_page_preview: true,
+      ...(last && markup ? { reply_markup: markup } : {}) });
   }
 }
 async function sendFile(name, content, caption) {
@@ -127,6 +162,8 @@ function card(l) {
 
 const HELP = `📖 BUYRUQLAR
 
+🏠 /menu — tugmali menyu
+
 📊 Hisobot (lid, A–E, holat, xarajat, 1 lid narxi, o‘rtacha chek, konversiya):
 /hisobot — shu oy
 /hisobot bugun | kecha | hafta | otganhafta | oy | otganoy | kvartal | yil | hammasi
@@ -161,15 +198,20 @@ async function handle(text) {
   const num = parseInt(args[0], 10);
 
   switch (cmd) {
-    case '/start': case '/yordam': case '/help':
+    case '/start': case '/menu': case '/menyu':
+      return send('🏠 Menyu — kerakli bo‘limni tanlang:', MENU);
+
+    case '/yordam': case '/help':
       return send(HELP);
 
     case '/hisobot': case '/stats': case '/statistika': {
-      const p = parsePeriod(args[0] || 'oy');
+      if (!args.length) return send('📊 Qaysi davr uchun hisobot?', periodKb('h'));
+      const p = parsePeriod(args[0]);
       return send(p ? report(p) : 'Davr tushunarsiz. Masalan: /hisobot oy yoki /hisobot 2026-10');
     }
 
     case '/lidlar': {
+      if (!args.length) return send('🔎 Qaysi davrdagi lidlar?', periodKb('l'));
       const f = parseFilters(args);
       const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status });
       const title = `🔎 ${f.period.label}${f.cat ? ' · ' + f.cat : ''}${f.status ? ' · ' + f.status : ''}: ${list.length} ta lid`;
@@ -214,6 +256,7 @@ async function handle(text) {
       const nums = [], rest = [];
       for (const a of args) (rest.length === 0 && /^(-?[\d.,]+|mln|млн|ming|тыс|k)$/i.test(a) ? nums : rest).push(a);
       const amount = parseAmount(nums);
+      if (!args.length) return askReply(`${ASK_EXP}\n\nShu xabarga javob qilib summa va kanalni yozing:\n500000 instagram\n1.5 mln target\n2000000 instagram 2026-10-01 izoh`);
       if (!amount) return send('Masalan: /xarajat 500000 instagram  yoki  /xarajat 1.5 mln target 2026-10-01');
       const channel = rest[0] && !DATE_RE.test(rest[0]) ? rest.shift().toLowerCase() : 'instagram';
       const date = rest[0] && DATE_RE.test(rest[0]) ? rest.shift() : undefined;
@@ -233,6 +276,7 @@ async function handle(text) {
       return send(deleteExpense(num) ? `Xarajat №${num} o‘chirildi` : 'Topilmadi. Masalan: /xarajat_ochir 12');
 
     case '/excel': case '/export': {
+      if (!args.length) return send('📁 Qaysi davr uchun Excel?', periodKb('e'));
       const f = parseFilters(args);
       const list = query({ from: f.period.from, to: f.period.to, cat: f.cat, status: f.status });
       return sendFile(`lidlar-${f.period.from}_${f.period.to}.csv`, toCSV(list),
@@ -247,18 +291,63 @@ async function handle(text) {
   }
 }
 
+// ---------- Tugma bosilganda ----------
+async function onButton(q) {
+  api('answerCallbackQuery', { callback_query_id: q.id });
+  const [act, a, b] = q.data.split(':');
+  const who = q.from.first_name || q.from.username || '';
+  switch (act) {
+    case 'menu': return send('🏠 Menyu — kerakli bo‘limni tanlang:', MENU);
+    case 'm':
+      if (a === 'hisobot') return send('📊 Qaysi davr uchun hisobot?', periodKb('h'));
+      if (a === 'lidlar') return send('🔎 Qaysi davrdagi lidlar?', periodKb('l'));
+      if (a === 'excel') return send('📁 Qaysi davr uchun Excel?', periodKb('e'));
+      if (a === 'xarajatlar') return send('📋 Qaysi davr xarajatlari?', periodKb('x'));
+      if (a === 'xarajat') return handle('/xarajat');
+      if (a === 'yordam') return handle('/yordam');
+      return;
+    case 'h': return handle(`/hisobot ${a}`);
+    case 'x': return handle(`/xarajatlar ${a}`);
+    case 'l': return b ? handle(`/lidlar ${a} ${b === '-' ? '' : b}`) : send('Qaysi lidlar?', filterKb('l', a));
+    case 'e': return b ? handle(`/excel ${a} ${b === '-' ? '' : b}`) : send('Qaysi lidlar Excel’ga?', filterKb('e', a));
+    case 's': {
+      if (b === 'sotildi') return askReply(`${ASK_SALE}${a}\n\nShu xabarga javob qilib sotuv summasini yozing:\n12000000  yoki  12 mln`);
+      const l = updateLead(+a, { status: b, amount: 0 });
+      return l && send(`№${l.n} → ${ICON[b]} ${b} (${who})`, null);
+    }
+    case 'c': {
+      const l = updateLead(+a, { cat: b, catManual: true });
+      return l && send(`№${l.n} → baho ${b} (${who})`, null);
+    }
+  }
+}
+
+// Bot savoliga javob (xarajat yoki sotuv summasi)
+async function onReply(m) {
+  const q = m.reply_to_message.text || '';
+  if (q.startsWith(ASK_EXP)) return handle(`/xarajat ${m.text}`);
+  if (q.startsWith(ASK_SALE)) {
+    const n = parseInt(q.slice(ASK_SALE.length), 10);
+    return handle(`/sotuv ${n} ${m.text}`);
+  }
+}
+
 // ---------- Ishga tushirish ----------
 async function poll() {
   let offset = 0;
   for (;;) {
     try {
-      const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}&allowed_updates=["message"]`);
+      const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}&allowed_updates=["message","callback_query"]`);
       const data = await res.json();
       for (const u of data.result || []) {
         offset = u.update_id + 1;
         const m = u.message;
-        if (m?.text?.startsWith('/') && String(m.chat.id) === String(CHAT)) {
-          await handle(m.text).catch(e => send('Xatolik: ' + e.message));
+        const q = u.callback_query;
+        if (q && String(q.message?.chat.id) === String(CHAT)) {
+          await onButton(q).catch(e => send('Xatolik: ' + e.message));
+        } else if (m?.text && String(m.chat.id) === String(CHAT)) {
+          if (m.reply_to_message?.from?.is_bot) await onReply(m).catch(e => send('Xatolik: ' + e.message));
+          else if (m.text.startsWith('/')) await handle(m.text).catch(e => send('Xatolik: ' + e.message));
         }
       }
     } catch (e) {
@@ -289,9 +378,19 @@ function scheduler() {
 
 export function startTelegram() {
   if (!TOKEN || !CHAT) { console.log('Telegram sozlanmagan — buyruqlar o‘chiq'); return; }
+  api('setMyCommands', { commands: [
+    { command: 'menu', description: '🏠 Menyu' },
+    { command: 'hisobot', description: '📊 Hisobot: lid, xarajat, o‘rtacha chek' },
+    { command: 'lidlar', description: '🔎 Lidlarni filtrlash' },
+    { command: 'xarajat', description: '📣 Xarajat qo‘shish' },
+    { command: 'xarajatlar', description: '📋 Xarajatlar ro‘yxati' },
+    { command: 'excel', description: '📁 Excel fayl' },
+    { command: 'qidir', description: '🔎 Telefon yoki @telegram bo‘yicha qidirish' },
+    { command: 'yordam', description: '📖 Barcha buyruqlar' },
+  ] });
   poll();
   scheduler();
   console.log('Telegram buyruqlari yoqildi');
 }
 
-export const _test = { handle, parsePeriod, parseAmount, report };
+export const _test = { handle, onButton, onReply, parsePeriod, parseAmount, report };
