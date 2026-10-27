@@ -1,4 +1,5 @@
 // Telegram guruhidagi buyruqlar: hisobotlar, filtr, qidiruv, holat, sotuv, xarajat.
+import { importHistory } from './history.js';
 import {
   query, getLead, updateLead, addExpense, deleteExpense, expensesIn, toCSV, expensesCSV,
   tashNow, iso, STATUSES, CATS,
@@ -29,7 +30,8 @@ const MENU = { inline_keyboard: [
 const periodKb = (act) => ({ inline_keyboard: [
   [btn('Bugun', `${act}:bugun`), btn('Kecha', `${act}:kecha`), btn('Hafta', `${act}:hafta`)],
   [btn('Oy', `${act}:oy`), btn('O‘tgan oy', `${act}:otganoy`), btn('Kvartal', `${act}:kvartal`)],
-  [btn('Yil', `${act}:yil`), btn('Hammasi', `${act}:hammasi`), btn('🏠 Menyu', 'menu')],
+  [btn('Yil', `${act}:yil`), btn('Hammasi', `${act}:hammasi`)],
+  [btn('📅 Boshqa davr (16.10..bugun)', `p:${act}`), btn('🏠 Menyu', 'menu')],
 ] });
 const filterKb = (act, period) => ({ inline_keyboard: [
   [btn('Hammasi', `${act}:${period}:-`)],
@@ -46,6 +48,8 @@ export const leadKb = (n) => ({ inline_keyboard: [
 // Javob kutadigan savollar (Telegram'da "reply") — privacy rejimida ham ishlaydi
 const ASK_EXP = '📣 XARAJAT QO‘SHISH';
 const ASK_SALE = '💰 SOTUV №';
+const ASK_PERIOD = '📅 DAVR';
+const ACT_CMD = { h: '/hisobot', l: '/lidlar', e: '/excel', x: '/xarajatlar' };
 const askReply = (text) => api('sendMessage', { chat_id: CHAT, text, reply_markup: { force_reply: true, selective: false } });
 
 export async function send(text, markup = HOME) {
@@ -68,9 +72,23 @@ async function sendFile(name, content, caption) {
 const add = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// 16.10 → 2026-10-16, 16.10.2025 → 2025-10-16, bugun → bugungi sana
+function normDate(x, t) {
+  if (x === 'bugun') return iso(t);
+  if (x === 'kecha') return iso(add(t, -1));
+  const m = x.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/);
+  if (m) return `${m[3] || t.getFullYear()}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return x;
+}
+
 function parsePeriod(tok) {
   const t = tashNow(); const today = iso(t);
-  const w = (tok || 'oy').toLowerCase();
+  let w = (tok || 'oy').toLowerCase();
+  if (/^\d{1,2}\.\d{1,2}(\.\d{4})?$/.test(w)) w = normDate(w, t);
+  if (/(\.\.|—|–|-|:)/.test(w) && !/^\d{4}-\d{2}(-\d{2})?$/.test(w)) {
+    const parts = w.split(/\.\.|—|–|:|(?<=\d|n)-(?=\d|b|k)/).map(x => normDate(x.trim(), t));
+    if (parts.length === 2 && DATE_RE.test(parts[0]) && DATE_RE.test(parts[1])) w = `${parts[0]}..${parts[1]}`;
+  }
   const weekStart = add(t, -((t.getDay() + 6) % 7));
   const q0 = Math.floor(t.getMonth() / 3) * 3;
   const map = {
@@ -189,7 +207,13 @@ const HELP = `📖 BUYRUQLAR
 
 📁 Excel:
 /excel oy B aktiv — filtrlangan lidlar
-/excel_xarajat yil — xarajatlar`;
+/excel_xarajat yil — xarajatlar
+
+📅 Istalgan davr: 16.10..bugun · 01.10..15.10 · 2026-10-16..2026-10-27
+   masalan: /hisobot 16.10..bugun · /lidlar 16.10..bugun A
+
+⬇️ Eski yozishmalarni yuklash:
+/import 16.10 — 16-oktyabrdan beri Direct'dagi raqamlarni bazaga qo‘shadi`;
 
 // ---------- Buyruqlar ----------
 async function handle(text) {
@@ -259,6 +283,7 @@ async function handle(text) {
       if (!args.length) return askReply(`${ASK_EXP}\n\nShu xabarga javob qilib summa va kanalni yozing:\n500000 instagram\n1.5 mln target\n2000000 instagram 2026-10-01 izoh`);
       if (!amount) return send('Masalan: /xarajat 500000 instagram  yoki  /xarajat 1.5 mln target 2026-10-01');
       const channel = rest[0] && !DATE_RE.test(rest[0]) ? rest.shift().toLowerCase() : 'instagram';
+      if (rest[0]) rest[0] = normDate(rest[0], tashNow());
       const date = rest[0] && DATE_RE.test(rest[0]) ? rest.shift() : undefined;
       const e = addExpense({ amount, channel, date, note: rest.join(' ') });
       return send(`📣 Xarajat №${e.id} yozildi: ${som(e.amount)} · ${e.channel} · ${e.date}${e.note ? ' · ' + e.note : ''}`);
@@ -270,6 +295,21 @@ async function handle(text) {
       const sum = list.reduce((s, e) => s + e.amount, 0);
       return send(`📣 Xarajatlar — ${p.label}: ${som(sum)}\n\n` +
         (list.map(e => `№${e.id} · ${e.date} · ${som(e.amount)} · ${e.channel}${e.note ? ' · ' + e.note : ''}`).join('\n') || 'Yozuv yo‘q'));
+    }
+
+    case '/import': {
+      const t = tashNow();
+      const from = normDate(args[0] || '', t);
+      if (!DATE_RE.test(from)) return send('Masalan: /import 16.10  — shu sanadan bugungacha Direct yozishmalarini yuklaydi');
+      await send(`⏳ ${from} dan beri Direct yozishmalarini yuklayapman… Bir necha daqiqa kutib turing.`, null);
+      const r = await importHistory(from);
+      return send(`✅ Import tugadi (${from} — ${iso(t)})\n\n` +
+        `Ko‘rilgan suhbatlar: ${r.conversations}\n` +
+        `Telefon/Telegram topilgan: ${r.withContact}\n` +
+        `Yangi lid sifatida qo‘shildi: ${r.added}\n` +
+        `Dublikat (oldin bor edi): ${r.duplicates}` +
+        (r.errors ? `\nXatoliklar: ${r.errors}` : '') +
+        `\n\nHisobot: /hisobot ${from}..bugun`);
     }
 
     case '/xarajat_ochir':
@@ -306,6 +346,7 @@ async function onButton(q) {
       if (a === 'xarajat') return handle('/xarajat');
       if (a === 'yordam') return handle('/yordam');
       return;
+    case 'p': return askReply(`${ASK_PERIOD} (${a})\n\nShu xabarga javob qilib davrni yozing:\n16.10..bugun\n01.10..15.10\n2026-10`);
     case 'h': return handle(`/hisobot ${a}`);
     case 'x': return handle(`/xarajatlar ${a}`);
     case 'l': return b ? handle(`/lidlar ${a} ${b === '-' ? '' : b}`) : send('Qaysi lidlar?', filterKb('l', a));
@@ -325,6 +366,10 @@ async function onButton(q) {
 // Bot savoliga javob (xarajat yoki sotuv summasi)
 async function onReply(m) {
   const q = m.reply_to_message.text || '';
+  if (q.startsWith(ASK_PERIOD)) {
+    const act = (q.match(/\((\w)\)/) || [])[1] || 'h';
+    return handle(`${ACT_CMD[act]} ${m.text.trim().replace(/\s+/g, '')}`);
+  }
   if (q.startsWith(ASK_EXP)) return handle(`/xarajat ${m.text}`);
   if (q.startsWith(ASK_SALE)) {
     const n = parseInt(q.slice(ASK_SALE.length), 10);

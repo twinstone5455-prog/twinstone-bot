@@ -101,12 +101,12 @@ const keyIndex = () => new Set(leads.flatMap(l => [l.phone, l.telegram]).filter(
 
 // ---------- Lidlar ----------
 /** Yangi lid. Dublikat bo'lsa null (telefon bor bo'lsa — telefon bo'yicha, bo'lmasa Telegram bo'yicha). */
-export function recordLead({ phone, telegram, instagram, igId, messages }) {
+export function recordLead({ phone, telegram, instagram, igId, messages, date, time, source }) {
   const keys = keyIndex();
   if (phone ? keys.has(phone) : keys.has(telegram)) return null;
   const t = tashNow();
   const lead = {
-    n: (leads.at(-1)?.n || 0) + 1, date: iso(t), time: hhmm(t),
+    n: (leads.at(-1)?.n || 0) + 1, date: date || iso(t), time: time || hhmm(t), source: source || 'direct',
     instagram, igId, phone: phone || null, telegram: telegram || null,
     messages: (messages || []).slice(-20), status: 'yangi', amount: 0, catManual: false,
   };
